@@ -315,6 +315,17 @@ def _download(url: str, dest: Path, timeout: float = 600) -> None:
         raise ReachError(UPSTREAM_BROKEN, _clean(f"download failed: {url}: {exc}")) from None
 
 
+def _pip_available(py: Path) -> bool:
+    try:
+        return subprocess.run([str(py), "-m", "pip", "--version"], capture_output=True, timeout=20).returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
+def _uv_exe() -> Optional[str]:
+    return shutil.which("uv") or (str(Path.home() / ".local/bin/uv") if (Path.home() / ".local/bin/uv").is_file() else None)
+
+
 def _install_pip(tool: Tool) -> None:
     venv = tool_dir(tool.name) / "venv"
     venv.parent.mkdir(parents=True, exist_ok=True)
@@ -323,8 +334,21 @@ def _install_pip(tool: Tool) -> None:
     # and pip cache; venv repairs a missing interpreter in place.
     if not py.is_file():
         _run([sys.executable, "-m", "venv", str(venv)], stage=f"{tool.name}:venv")
-    _run([str(py), "-m", "pip", "install", "--quiet", "--disable-pip-version-check", install_spec(tool)],
-         stage=f"{tool.name}:pip_packages")
+    spec = install_spec(tool)
+    if _pip_available(py):
+        _run([str(py), "-m", "pip", "install", "--quiet", "--disable-pip-version-check", spec],
+             stage=f"{tool.name}:pip_packages")
+    else:
+        uv = _uv_exe()
+        if uv:
+            _run([uv, "pip", "install", "--python", str(py), spec], stage=f"{tool.name}:pip_packages")
+        else:
+            try:
+                subprocess.run([str(py), "-m", "ensurepip", "--upgrade"], capture_output=True, timeout=120)
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+            _run([str(py), "-m", "pip", "install", "--quiet", "--disable-pip-version-check", spec],
+                 stage=f"{tool.name}:pip_packages")
     if tool.kind == "ffmpeg":
         exe = _run([str(py), "-c", "import imageio_ffmpeg; print(imageio_ffmpeg.get_ffmpeg_exe())"]).strip()
         link = _private_bin(tool, "ffmpeg")
